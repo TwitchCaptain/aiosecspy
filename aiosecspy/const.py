@@ -35,6 +35,7 @@ class EventType(StrEnum):
     # Library-only
     CONNECTED = "CONNECTED"
     DISCONNECTED = "DISCONNECTED"
+    AUTHFAIL = "AUTHFAIL"
     UNKNOWN = "UNKNOWN"
     ALL = "ALL"
     REFRESH = "REFRESH"
@@ -136,5 +137,32 @@ PTZ_DOWN_RIGHT = 11
 PTZ_PRESET_BASE = 12  # preset N -> 11+N
 PTZ_STOP = 99
 
+PTZ_PRESET_MIN = 1
+PTZ_PRESET_MAX = 8
+
 DEFAULT_TIMEOUT = 30.0
+
+# Event stream tuning.
 EVENT_RECONNECT_DELAY = 5.0
+EVENT_RECONNECT_MAX_DELAY = 300.0
+# SecuritySpy emits NULL keepalives on the event stream, so a long silence means
+# the socket is dead even though TCP never noticed.
+EVENT_READ_TIMEOUT = 300.0
+# A single event line is a timestamp, id, camera and a short message. Anything
+# larger is a malformed or hostile stream, so the reassembly buffer is capped.
+EVENT_MAX_LINE_BYTES = 64 * 1024
+
+# Response size ceilings. A compromised or malfunctioning server should not be
+# able to exhaust memory on the client.
+MAX_TEXT_RESPONSE_BYTES = 16 * 1024 * 1024
+MAX_IMAGE_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+MIN_PORT = 1
+MAX_PORT = 65535
+
+MIN_QUALITY = 1
+MAX_QUALITY = 100
+MAX_IMAGE_DIMENSION = 16384
+
+DOWNLOAD_DATE_FORMAT = "%Y-%m-%d"

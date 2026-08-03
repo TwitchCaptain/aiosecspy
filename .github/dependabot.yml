@@ -11,6 +11,10 @@ updates:
     labels:
       - dependencies
       - github-actions
+    groups:
+      actions:
+        patterns:
+          - "*"
 
   - package-ecosystem: pip
     directory: /
@@ -21,3 +25,8 @@ updates:
     labels:
       - dependencies
       - python
+    groups:
+      dev-dependencies:
+        dependency-type: development
+        patterns:
+          - "*"

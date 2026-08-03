@@ -4,6 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .const import (
+    PTZ_CONTINUOUS,
+    PTZ_HOME,
+    PTZ_PAN_TILT,
+    PTZ_PRESETS,
+    PTZ_SPEED,
+    PTZ_ZOOM,
+)
+
 
 @dataclass
 class PTZCapabilities:
@@ -20,15 +29,6 @@ class PTZCapabilities:
     @classmethod
     def from_raw(cls, raw: int) -> PTZCapabilities:
         """Build from SecuritySpy capability integer."""
-        from .const import (
-            PTZ_CONTINUOUS,
-            PTZ_HOME,
-            PTZ_PAN_TILT,
-            PTZ_PRESETS,
-            PTZ_SPEED,
-            PTZ_ZOOM,
-        )
-
         return cls(
             raw=raw,
             has_pan_tilt=bool(raw & PTZ_PAN_TILT),
@@ -85,6 +85,20 @@ class Camera:
     def armed_actions(self) -> bool:
         """True if actions are armed."""
         return self.mode_a.lower() == "armed"
+
+    def copy_runtime_state(self, other: Camera) -> None:
+        """Adopt the event-stream state of a previous instance of this camera.
+
+        ++systemInfo does not report motion or classification state, so a
+        refresh would otherwise reset everything the event stream has observed.
+        """
+        self.motion_active = other.motion_active
+        self.event_object = other.event_object
+        self.score_human = other.score_human
+        self.score_vehicle = other.score_vehicle
+        self.score_animal = other.score_animal
+        self.last_motion_time = other.last_motion_time
+        self.trigger_reasons = list(other.trigger_reasons)
 
 
 @dataclass
