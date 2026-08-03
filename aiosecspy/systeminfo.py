@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-import xml.etree.ElementTree as ET
+from typing import TYPE_CHECKING
 
 from .models import Camera, PTZCapabilities, ServerInfo
+from .util import parse_xml
+
+if TYPE_CHECKING:
+    import xml.etree.ElementTree as ET
 
 
 def _text(node: ET.Element | None, *tags: str, default: str = "") -> str:
@@ -75,11 +79,10 @@ def _parse_camera(node: ET.Element) -> Camera:
 
 def parse_system_info(xml_text: str) -> ServerInfo:
     """Parse SecuritySpy ++systemInfo XML into ServerInfo."""
-    root = ET.fromstring(xml_text)
+    root = parse_xml(xml_text, label="++systemInfo")
     server = root.find("server")
     info = ServerInfo(
-        name=_text(server, "server-name", "name", default="SecuritySpy")
-        or "SecuritySpy",
+        name=_text(server, "server-name", "name", default="SecuritySpy") or "SecuritySpy",
         version=_text(server, "version"),
         uuid=_text(server, "uuid"),
         ip1=_text(server, "ip1"),
@@ -90,9 +93,7 @@ def parse_system_info(xml_text: str) -> ServerInfo:
         https_enabled=_boolish(_text(server, "https-enabled", default="no")),
         gmt_offset_seconds=_int(server, "seconds-from-gmt"),
         camera_count=_int(server, "camera-count"),
-        schedules=_parse_named_list(
-            root, ".//schedule-list/schedule", ".//schedulelist/schedule"
-        ),
+        schedules=_parse_named_list(root, ".//schedule-list/schedule", ".//schedulelist/schedule"),
         overrides=_parse_named_list(
             root,
             ".//schedule-override-list/schedule-override",
@@ -105,9 +106,7 @@ def parse_system_info(xml_text: str) -> ServerInfo:
         ),
     )
 
-    cam_nodes = root.findall(".//camera-list/camera") or root.findall(
-        ".//cameralist/camera"
-    )
+    cam_nodes = root.findall(".//camera-list/camera") or root.findall(".//cameralist/camera")
     for node in cam_nodes:
         cam = _parse_camera(node)
         info.cameras[cam.number] = cam

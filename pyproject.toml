@@ -4,7 +4,6 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aiosecspy"
-version = "0.1.0"
 description = "Async Python client for Ben Software SecuritySpy (v5/v6)"
 readme = "README.md"
 license = "MIT"
@@ -12,6 +11,7 @@ license-files = ["LICENSE"]
 requires-python = ">=3.12"
 authors = [{ name = "David Newhall II" }]
 keywords = ["securityspy", "homeassistant", "aiohttp"]
+dynamic = ["version"]
 classifiers = [
   "Development Status :: 4 - Beta",
   "Framework :: AsyncIO",
@@ -29,10 +29,13 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.5.0",
+  "mypy>=1.19.0",
   "pytest>=9.1.1",
   "pytest-asyncio>=1.4.0",
+  "pytest-cov>=7.1.0",
   "ruff>=0.16.1",
-  "build>=1.5.0",
+  "twine>=6.2.0",
 ]
 
 [project.urls]
@@ -40,6 +43,9 @@ Homepage = "https://github.com/TwitchCaptain/aiosecspy"
 Documentation = "https://github.com/TwitchCaptain/aiosecspy#readme"
 Issues = "https://github.com/TwitchCaptain/aiosecspy/issues"
 Changelog = "https://github.com/TwitchCaptain/aiosecspy/releases"
+
+[tool.setuptools.dynamic]
+version = { attr = "aiosecspy.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["aiosecspy*"]
@@ -49,8 +55,58 @@ aiosecspy = ["py.typed"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+filterwarnings = ["error"]
+
+[tool.coverage.run]
+source = ["aiosecspy"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+enable_error_code = [
+  "ignore-without-code",
+  "redundant-expr",
+  "truthy-bool",
+]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",  # conflicts with the formatter
+  "CPY001",  # no per-file copyright headers in this project
+  "D203",    # incompatible with D211
+  "D213",    # incompatible with D212
+  "ISC001",  # conflicts with the formatter
+  "TRY003",  # short messages inline read better than an exception hierarchy
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+  "ANN",     # test helpers do not need full annotations
+  "ARG",     # fixtures are requested by name, not always used directly
+  "D",       # docstrings are not required in tests
+  "INP001",  # pytest collects tests without an __init__.py
+  "PLR2004", # magic values are the point of assertions
+  "S101",    # assert is how pytest works
+  "S105",    # hard-coded fake credentials
+  "S106",
+  "SLF001",  # tests may poke at internals
+]
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
