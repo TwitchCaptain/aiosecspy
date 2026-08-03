@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import ipaddress
 from datetime import UTC, datetime, timedelta, timezone
 from http import HTTPStatus
@@ -67,11 +68,10 @@ def _normalize_host(host: str) -> str:
     if not host or any(c in host for c in "/?#@ \t\r\n"):
         msg = f"invalid host: {host!r}"
         raise ValueError(msg)
-    try:
+    # Only IPv6 literals need brackets; a hostname is not an IP and raises here.
+    with contextlib.suppress(ValueError):
         if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
             return f"[{host}]"
-    except ValueError:
-        pass
     return host
 
 

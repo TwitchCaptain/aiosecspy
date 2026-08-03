@@ -75,7 +75,8 @@ class FakeSecSpy:
         for call in reversed(self.calls):
             if call.path == path:
                 return call.query
-        pytest.fail(f"no request was made to {path}; saw {[c.path for c in self.calls]}")
+        msg = f"no request was made to {path}; saw {[c.path for c in self.calls]}"
+        raise AssertionError(msg)
 
     def paths(self) -> list[str]:
         """Every path requested so far, in order."""

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -225,8 +224,9 @@ class EventStream:
             # cancelling ourselves here would just raise into the callback.
             return
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        # return_exceptions keeps the expected CancelledError, and anything the
+        # watcher died of, from escaping what is a cleanup call.
+        await asyncio.gather(task, return_exceptions=True)
 
     async def _emit(self, event: Event) -> None:
         for callback in list(self._callbacks):
