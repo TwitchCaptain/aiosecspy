@@ -111,12 +111,7 @@ def parse_event_line(
             event.errors.append("cam_parse_fail")
 
     tokens = msg.split()
-    type_s = tokens[0] if tokens else ""
-    if type_s in {member.value for member in KNOWN_EVENT_TYPES}:
-        event.event_type = EventType(type_s)
-    else:
-        event.event_type = EventType.UNKNOWN
-        event.errors.append("unknown_event")
+    event.event_type = _wire_event_type(tokens[0] if tokens else "", event)
 
     if event.event_type is EventType.CLASSIFY and len(tokens) > 1:
         _parse_classify(tokens[1:], event)
@@ -128,6 +123,21 @@ def parse_event_line(
         _parse_trigger_reasons(tokens[1], event, major_version)
 
     return event
+
+
+def _wire_event_type(type_s: str, event: Event) -> EventType:
+    """Map a wire event-name token to a known EventType, else UNKNOWN."""
+    try:
+        et = EventType(type_s)
+    except ValueError:
+        event.errors.append("unknown_event")
+        return EventType.UNKNOWN
+    # Reject library-only values (CONNECTED, AUTHFAIL, …) that happen to
+    # parse as EventType but are not on the wire.
+    if et not in KNOWN_EVENT_TYPES:
+        event.errors.append("unknown_event")
+        return EventType.UNKNOWN
+    return et
 
 
 def _parse_classify(parts: list[str], event: Event) -> None:
