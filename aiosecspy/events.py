@@ -301,18 +301,21 @@ class EventStream:
             if self._stop.is_set():
                 return
             buffer.extend(chunk)
-            if len(buffer) > EVENT_MAX_LINE_BYTES:
-                msg = (
-                    f"event stream sent {len(buffer)} bytes without a line break; "
-                    "dropping the connection"
-                )
-                raise RequestError(msg)
+            # Drain complete lines before applying the size cap so a large
+            # chunk that contains many CR-terminated events is not mistaken
+            # for a single unbounded line.
             while (idx := buffer.find(b"\r")) >= 0:
                 line = bytes(buffer[:idx]).decode("utf-8", errors="replace")
                 del buffer[: idx + 1]
                 await self._handle_line(line)
                 if self._stop.is_set():
                     return
+            if len(buffer) > EVENT_MAX_LINE_BYTES:
+                msg = (
+                    f"event stream sent {len(buffer)} bytes without a line break; "
+                    "dropping the connection"
+                )
+                raise RequestError(msg)
 
     async def _handle_line(self, line: str) -> None:
         # Header alone is three spaces; anything shorter is a partial line.

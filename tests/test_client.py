@@ -37,12 +37,28 @@ class TestConstruction:
     def test_ipv6_host_is_bracketed(self):
         assert make_client("::1").base_url == "http://[::1]:8000/"
 
+    def test_bracketed_ipv6_host_is_accepted(self):
+        assert make_client("[::1]").base_url == "http://[::1]:8000/"
+
     def test_accepts_a_pasted_url_as_host(self):
         assert make_client("https://cam.example/").host == "cam.example"
 
     @pytest.mark.parametrize("host", ["", "   ", "cam.example/path", "cam example"])
     def test_rejects_unusable_hosts(self, host):
         with pytest.raises(ValueError, match="host"):
+            make_client(host)
+
+    @pytest.mark.parametrize(
+        "host",
+        [
+            "cam.example:8000",
+            "[::1]:8000",
+            "https://cam.example:8000/",
+            "192.0.2.1:8000",
+        ],
+    )
+    def test_rejects_hosts_that_already_include_a_port(self, host):
+        with pytest.raises(ValueError, match="port"):
             make_client(host)
 
     @pytest.mark.parametrize("port", [0, -1, 70000])
@@ -299,6 +315,14 @@ class TestUntrustedInput:
         fake_server.bytes("/++getfilehb/4/2018-10-17/10-17-2018+M+Gate.m4v", b"movie")
         data = await client.download_file("++getfile/4/2018-10-17/10-17-2018+M+Gate.m4v")
         assert data == b"movie"
+
+    async def test_download_href_auth_cannot_override_client_credentials(self, client, fake_server):
+        fake_server.bytes("/++getfilehb/4/x.m4v", b"movie")
+        await client.download_file("++getfile/4/x.m4v?auth=attackerblob&cameraNum=4")
+        assert fake_server.query_for("/++getfilehb/4/x.m4v") == {
+            "auth": EXPECTED_AUTH,
+            "cameraNum": "4",
+        }
 
     async def test_download_can_request_the_low_bandwidth_copy(self, client, fake_server):
         fake_server.bytes("/++getfilelb/4/x.m4v", b"small")

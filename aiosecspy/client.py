@@ -55,17 +55,54 @@ if TYPE_CHECKING:
 _UNSAFE_PATH = ("://", "\\", "\n", "\r", "\t")
 
 
+def _reject_embedded_port() -> None:
+    """Raise when a host string already carries a port."""
+    msg = "host must not include a port; pass port= separately"
+    raise ValueError(msg)
+
+
+def _strip_host_input(host: str) -> str:
+    """Pull a bare hostname/IP out of a pasted URL or bracketed IPv6 literal."""
+    if "://" in host:
+        parsed = urlsplit(host)
+        if parsed.port is not None:
+            _reject_embedded_port()
+        return parsed.hostname or ""
+    if host.startswith("["):
+        # Bracketed IPv6: "[::1]" or the invalid "[::1]:8000".
+        end = host.find("]")
+        if end < 0:
+            msg = f"invalid host: {host!r}"
+            raise ValueError(msg)
+        if host[end + 1 :]:
+            _reject_embedded_port()
+        return host[1:end]
+    # A bare "hostname:port" or "1.2.3.4:port" is a common paste mistake.
+    # Unbracketed IPv6 literals contain colons but parse as addresses, so leave
+    # those alone; reject only a trailing decimal port.
+    if ":" in host:
+        with contextlib.suppress(ValueError):
+            if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+                return host
+        maybe_host, _, maybe_port = host.rpartition(":")
+        if maybe_host and maybe_port.isdigit():
+            _reject_embedded_port()
+    return host
+
+
 def _normalize_host(host: str) -> str:
-    """Return a host usable in a URL authority, bracketing IPv6 literals."""
+    """Return a host usable in a URL authority, bracketing IPv6 literals.
+
+    Accepts a bare hostname, an IPv4/IPv6 literal, or a full URL (scheme and
+    path ignored). Host strings that already include a port are rejected so
+    callers cannot accidentally build ``host:port:port``.
+    """
     host = host.strip()
     if not host:
         msg = "host must not be empty"
         raise ValueError(msg)
-    # Tolerate users pasting a full URL into a "host" field.
-    if "://" in host:
-        host = urlsplit(host).hostname or ""
-    host = host.strip("[]").rstrip("/")
-    if not host or any(c in host for c in "/?#@ \t\r\n"):
+    host = _strip_host_input(host).rstrip("/")
+    if not host or any(c in host for c in "/?#@[] \t\r\n"):
         msg = f"invalid host: {host!r}"
         raise ValueError(msg)
     # Only IPv6 literals need brackets; a hostname is not an IP and raises here.
@@ -172,9 +209,10 @@ class SecSpyClient:
         return url
 
     def _params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        params: dict[str, Any] = {"auth": self._auth}
-        if extra:
-            params.update(extra)
+        # Auth is written last so a server-supplied href query cannot replace
+        # the client's credentials (for example via ++download link params).
+        params: dict[str, Any] = dict(extra) if extra else {}
+        params["auth"] = self._auth
         return params
 
     def event_stream_url(self) -> str:

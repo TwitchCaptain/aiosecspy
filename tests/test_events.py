@@ -199,6 +199,20 @@ class TestEventStream:
         assert events[-1].event_type == EventType.DISCONNECTED
         assert "without a line break" in events[-1].msg
 
+    async def test_a_large_chunk_of_complete_lines_is_not_a_flood(self, open_client, fake_server):
+        # Enough CR-terminated events to exceed the buffer cap if the
+        # streamer measured before draining, which used to false-disconnect.
+        line = b"20190927092026 3 3 MOTION\r"
+        payload = line * ((EVENT_MAX_LINE_BYTES // len(line)) + 4)
+        fake_server.route("/++eventStream", stream_handler([payload]))
+        open_client.events.start()
+        events = await collect(open_client.events, 3)
+        await open_client.events.stop()
+
+        assert events[0].event_type == EventType.CONNECTED
+        assert events[1].event_type == EventType.MOTION
+        assert EventType.DISCONNECTED not in {e.event_type for e in events}
+
     async def test_config_change_triggers_a_refresh(self, open_client, fake_server):
         fake_server.route(
             "/++eventStream",
