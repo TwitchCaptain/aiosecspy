@@ -301,11 +301,25 @@ class TestUntrustedInput:
 
     @pytest.mark.parametrize(
         "api",
-        ["++a\\b", "++a\nb", "/absolute", "++a://b"],
+        [
+            "++a\\b",
+            "++a\nb",
+            "/absolute",
+            "++a://b",
+            "++getfile/%2e%2e/%2e%2e/etc/passwd",
+            "++getfile/%2E%2E/secret",
+            "++getfile/%0aOK",
+            "++getfile/%5cwindows",
+        ],
     )
     def test_url_builder_refuses_hostile_paths(self, client, api):
         with pytest.raises(UntrustedHostError):
             client._url(api)
+
+    async def test_download_refuses_percent_encoded_traversal(self, client, fake_server):
+        with pytest.raises(UntrustedHostError):
+            await client.download_file("++getfile/%2e%2e/%2e%2e/etc/passwd")
+        assert fake_server.calls == []
 
     async def test_href_without_the_plusplus_prefix_is_normalized(self, client, fake_server):
         fake_server.bytes("/++getfilehb/4/x.m4v", b"movie")

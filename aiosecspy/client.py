@@ -8,7 +8,7 @@ import ipaddress
 from datetime import UTC, datetime, timedelta, timezone
 from http import HTTPStatus
 from typing import TYPE_CHECKING, Any, Self
-from urllib.parse import parse_qsl, quote, urlencode, urljoin, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urljoin, urlsplit
 
 import aiohttp
 
@@ -195,18 +195,27 @@ class SecSpyClient:
         change host, port or scheme is rejected so the ``auth`` parameter is
         never handed to a third party.
         """
-        if api.startswith("/") or any(bad in api for bad in _UNSAFE_PATH):
-            msg = f"refusing to request unsafe path: {redact(api)!r}"
-            raise UntrustedHostError(msg)
+        self._reject_unsafe_path(api)
         path = (api if api.startswith("++") else f"++{api}").replace(" ", "%20")
-        if any(seg == ".." for seg in path.split("?", 1)[0].split("/")):
-            msg = f"refusing to request traversing path: {redact(path)!r}"
-            raise UntrustedHostError(msg)
+        # Check the percent-decoded path too, so %2e%2e / %0a / %5c cannot
+        # sneak past the literal-character guards above.
+        self._reject_unsafe_path(unquote(path.split("?", 1)[0]), label=path)
         url = urljoin(self.base_url, path)
         if urlsplit(url).netloc.lower() != self._base_netloc:
             msg = f"refusing to request off-server URL for {redact(api)!r}"
             raise UntrustedHostError(msg)
         return url
+
+    @staticmethod
+    def _reject_unsafe_path(path: str, *, label: str | None = None) -> None:
+        """Refuse absolute, traversing, or control-character paths."""
+        shown = redact(label if label is not None else path)
+        if path.startswith("/") or any(bad in path for bad in _UNSAFE_PATH):
+            msg = f"refusing to request unsafe path: {shown!r}"
+            raise UntrustedHostError(msg)
+        if any(seg == ".." for seg in path.split("?", 1)[0].split("/")):
+            msg = f"refusing to request traversing path: {shown!r}"
+            raise UntrustedHostError(msg)
 
     def _params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
         # Auth is written last so a server-supplied href query cannot replace
