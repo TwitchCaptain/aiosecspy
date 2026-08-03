@@ -267,6 +267,18 @@ class TestUntrustedInput:
             await client.download_file("++getfile/../../etc/passwd")
         assert fake_server.calls == []
 
+    @pytest.mark.parametrize(
+        "href",
+        [
+            "++getfile/../../etc/passwd?auth=SUPERSECRET",
+            "++get\\file/x?auth=SUPERSECRET",
+        ],
+    )
+    async def test_refusal_messages_do_not_echo_credentials(self, client, href):
+        with pytest.raises(UntrustedHostError) as excinfo:
+            await client.download_file(href)
+        assert "SUPERSECRET" not in str(excinfo.value)
+
     async def test_download_refuses_an_empty_href(self, client):
         with pytest.raises(UntrustedHostError):
             await client.download_file("  ")

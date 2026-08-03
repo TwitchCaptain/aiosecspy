@@ -163,11 +163,11 @@ class SecSpyClient:
             raise UntrustedHostError(msg)
         path = (api if api.startswith("++") else f"++{api}").replace(" ", "%20")
         if any(seg == ".." for seg in path.split("?", 1)[0].split("/")):
-            msg = f"refusing to request traversing path: {path!r}"
+            msg = f"refusing to request traversing path: {redact(path)!r}"
             raise UntrustedHostError(msg)
         url = urljoin(self.base_url, path)
         if urlsplit(url).netloc.lower() != self._base_netloc:
-            msg = f"refusing to request off-server URL for {api!r}"
+            msg = f"refusing to request off-server URL for {redact(api)!r}"
             raise UntrustedHostError(msg)
         return url
 
@@ -300,9 +300,12 @@ class SecSpyClient:
     async def refresh(self) -> ServerInfo:
         """Fetch and parse ++systemInfo.
 
-        Runtime state that only the event stream knows about (motion, object
-        classification scores) is carried over onto the new camera objects, so
-        callers holding a reference to :attr:`cameras` do not lose it.
+        This replaces :attr:`info` and every :class:`~.models.Camera` in
+        :attr:`cameras`, so references taken before the call go stale. Runtime
+        state that only the event stream knows about (motion, object
+        classification scores) is copied onto the new camera objects rather
+        than reset, so re-reading :attr:`cameras` after a refresh still shows
+        what the stream has observed.
         """
         xml_text = await self._request_text("++systemInfo", {"format": "xml"})
         info = parse_system_info(xml_text)
