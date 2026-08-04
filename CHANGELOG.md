@@ -4,6 +4,14 @@ All notable changes to `aiosecspy` are documented here. The project follows
 [Semantic Versioning](https://semver.org/) and this file follows
 [Keep a Changelog](https://keepachangelog.com/).
 
+## [0.2.1] - 2026-08-04
+
+### Fixed
+
+- Relaxed the `aiohttp` dependency from `>=3.14.3` to `>=3.9.0` so Home
+  Assistant Core can install `aiosecspy` without fighting HA's own aiohttp pin
+  (HA 2026.2.3 ships `aiohttp==3.13.3`).
+
 ## [0.2.0] - 2026-08-04
 
 ### Added
@@ -59,5 +67,6 @@ Initial release: async client for the SecuritySpy HTTP API with `++systemInfo`
 parsing, arm/disarm and schedule control, PTZ, snapshots, RTSP/MJPEG URL
 helpers, recording downloads, and a reconnecting `++eventStream` watcher.
 
+[0.2.1]: https://github.com/TwitchCaptain/aiosecspy/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/TwitchCaptain/aiosecspy/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/TwitchCaptain/aiosecspy/releases/tag/v0.1.0
