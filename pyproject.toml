@@ -24,7 +24,10 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
-  "aiohttp>=3.14.3",
+  # Keep this loose enough for Home Assistant Core, which pins aiohttp itself
+  # (e.g. HA 2026.2.3 → aiohttp==3.13.3). A floor of 3.14.x made HA's
+  # requirement installer refuse aiosecspy and/or upgrade HA's pinned aiohttp.
+  "aiohttp>=3.9.0",
 ]
 
 [project.optional-dependencies]

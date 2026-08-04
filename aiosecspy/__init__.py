@@ -38,4 +38,4 @@ __all__ = [
     "parse_system_info",
 ]
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
