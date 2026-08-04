@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import UTC
 from urllib.parse import parse_qsl, urlsplit
@@ -13,6 +14,7 @@ from conftest import read_fixture
 
 from aiosecspy import (
     AuthenticationError,
+    RecordingFile,
     RequestError,
     ResponseTooLargeError,
     SecSpyClient,
@@ -75,6 +77,13 @@ class TestConstruction:
         client = SecSpyClient("cam.example", 8000, "user", "p+a/ss")
         blob = client.auth_params()["auth"]
         assert base64.urlsafe_b64decode(blob) == b"user:p+a/ss"
+
+    def test_rejects_a_colon_in_the_username(self):
+        with pytest.raises(ValueError, match="username"):
+            SecSpyClient("cam.example", 8000, "user:name", "pass")
+
+    def test_repr_hides_the_username(self):
+        assert "user" not in repr(make_client())
 
 
 class TestRequests:
@@ -142,6 +151,25 @@ class TestRequests:
         fake_server.route("/++getfilehb/1/x.m4v", chunked)
         with pytest.raises(ResponseTooLargeError):
             await client.download_file("++getfile/1/x.m4v")
+
+    async def test_multi_chunk_response_is_read_to_the_end(self, client, fake_server):
+        """StreamReader.read(n) returns early; the client must keep reading.
+
+        A real ++systemInfo arrives in several TCP chunks; truncating at the
+        first chunk produced unparsable XML (seen against a live server).
+        """
+
+        async def chunked(request: web.Request) -> web.StreamResponse:
+            resp = web.StreamResponse()
+            await resp.prepare(request)
+            for _ in range(8):
+                await resp.write(b"y" * 1024)
+                await asyncio.sleep(0)
+            return resp
+
+        fake_server.route("/++getfilehb/1/x.m4v", chunked)
+        body = await client.download_file("++getfile/1/x.m4v")
+        assert len(body) == 8 * 1024
 
 
 class TestCommands:
@@ -367,7 +395,7 @@ class TestFileListing:
         fake_server.text("/++download", self.FEED)
         files = await open_client.list_motion_files(3, days=2, limit=10)
 
-        assert [f["title"] for f in files] == ["Gate", "Door"]
+        assert [f.title for f in files] == ["Gate", "Door"]
         query = fake_server.query_for("/++download")
         assert query["mcFilesCheck"] == "1"
         assert query["results"] == "10"
@@ -378,6 +406,15 @@ class TestFileListing:
     async def test_limit_is_applied_to_the_parsed_feed(self, open_client, fake_server):
         fake_server.text("/++download", self.FEED)
         assert len(await open_client.list_motion_files(3, limit=1)) == 1
+
+    async def test_no_camera_filter_asks_for_every_camera(self, open_client, fake_server):
+        """A real server returns an empty feed unless cameraNum is present."""
+        fake_server.text("/++download", self.FEED)
+        await open_client.list_motion_files()
+        pairs = fake_server.query_pairs_for("/++download")
+        sent = [value for key, value in pairs if key == "cameraNum"]
+        assert sent == [str(n) for n in sorted(open_client.cameras)]
+        assert len(sent) > 1
 
     @pytest.mark.parametrize(("days", "limit"), [(0, 5), (1, 0)])
     async def test_rejects_nonsense_windows(self, open_client, days, limit):
@@ -402,7 +439,7 @@ class TestFileListing:
             "</item></feed>",
         )
         files = await open_client.list_motion_files()
-        assert files == [{"title": "Gate", "href": "++getfile/4/x.m4v"}]
+        assert files == [RecordingFile(title="Gate", href="++getfile/4/x.m4v")]
 
     async def test_falls_back_to_scanning_for_getfile_attributes(self, open_client, fake_server):
         fake_server.text(
@@ -412,29 +449,44 @@ class TestFileListing:
             "</feed>",
         )
         files = await open_client.list_motion_files()
-        assert files == [{"title": "Gate", "href": "++getfile/4/x.m4v"}]
+        assert files == [RecordingFile(title="Gate", href="++getfile/4/x.m4v")]
 
 
 class TestCoverageOfTheThinWrappers:
     """The one-line command wrappers still need to send the right thing."""
 
     @pytest.mark.parametrize(
-        ("method", "args", "command"),
+        ("method", "kwargs", "command"),
         [
-            ("ptz_left", (), "1"),
-            ("ptz_right", (), "2"),
-            ("ptz_up", (), "3"),
-            ("ptz_down", (), "4"),
-            ("ptz_zoom", (True,), "5"),
-            ("ptz_zoom", (False,), "6"),
-            ("ptz_home", (), "7"),
-            ("ptz_stop", (), "99"),
+            ("ptz_left", {}, "1"),
+            ("ptz_right", {}, "2"),
+            ("ptz_up", {}, "3"),
+            ("ptz_down", {}, "4"),
+            ("ptz_zoom", {"zoom_in": True}, "5"),
+            ("ptz_zoom", {"zoom_in": False}, "6"),
+            ("ptz_home", {}, "7"),
+            ("ptz_up_left", {}, "8"),
+            ("ptz_up_right", {}, "9"),
+            ("ptz_down_left", {}, "10"),
+            ("ptz_down_right", {}, "11"),
+            ("ptz_stop", {}, "99"),
         ],
     )
-    async def test_ptz_wrappers(self, open_client, fake_server, method, args, command):
+    async def test_ptz_wrappers(self, open_client, fake_server, method, kwargs, command):
         fake_server.ok("/++ptz/command")
-        await getattr(open_client, method)(3, *args)
+        await getattr(open_client, method)(3, **kwargs)
         assert fake_server.query_for("/++ptz/command")["command"] == command
+
+    @pytest.mark.parametrize(("preset", "command"), [(1, "112"), (8, "119")])
+    async def test_ptz_save_preset(self, open_client, fake_server, preset, command):
+        fake_server.ok("/++ptz/command")
+        await open_client.ptz_save_preset(3, preset)
+        assert fake_server.query_for("/++ptz/command")["command"] == command
+
+    @pytest.mark.parametrize("preset", [0, 9])
+    async def test_ptz_save_preset_rejects_out_of_range(self, open_client, preset):
+        with pytest.raises(ValueError, match="PTZ preset"):
+            await open_client.ptz_save_preset(3, preset)
 
     async def test_toggle_actions(self, open_client, fake_server):
         fake_server.ok("/++ssControlActions")

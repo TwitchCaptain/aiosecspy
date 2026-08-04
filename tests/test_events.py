@@ -8,9 +8,23 @@ from datetime import UTC, timedelta, timezone
 import pytest
 from aiohttp import web
 
-from aiosecspy import Event, EventType, SecSpyClient, TriggerReason, parse_event_line
+from aiosecspy import (
+    CLASSIFY_ABSENT,
+    Event,
+    EventType,
+    SecSpyClient,
+    TriggerReason,
+    parse_event_line,
+)
 from aiosecspy.const import EVENT_MAX_LINE_BYTES
 from aiosecspy.exceptions import RequestError
+
+
+async def wait_for(predicate, deadline=5.0):
+    """Poll until ``predicate()`` is truthy or the deadline expires."""
+    async with asyncio.timeout(deadline):
+        while not predicate():  # noqa: ASYNC110 - camera state has no event to await
+            await asyncio.sleep(0.01)
 
 
 async def collect(stream, count, deadline=5.0):
@@ -179,6 +193,10 @@ class TestEventStream:
         fake_server.route("/++eventStream", stream_handler([], status=401))
         open_client.events.start()
         events = await collect(open_client.events, 2)
+        dispatch_task = open_client.events._dispatch_task
+        # The sentinel queued after AUTHFAIL/DISCONNECTED must end the
+        # dispatcher on its own; a leaked task would outlive the watcher.
+        await wait_for(dispatch_task.done)
         await open_client.events.stop()
 
         assert [e.event_type for e in events] == [
@@ -186,6 +204,7 @@ class TestEventStream:
             EventType.DISCONNECTED,
         ]
         assert open_client.events.running is False
+        assert dispatch_task.done()
 
     async def test_a_flood_without_line_breaks_drops_the_connection(self, open_client, fake_server):
         fake_server.route(
@@ -287,3 +306,144 @@ class TestEventStream:
         await open_client.events.stop()
 
         assert events[-1].event_type == EventType.REFRESHFAIL
+
+    async def test_a_clean_stream_end_emits_disconnected(self, open_client, fake_server):
+        fake_server.route(
+            "/++eventStream",
+            stream_handler([b"20190927092026 3 3 MOTION\r"]),
+        )
+        open_client.events.start(reconnect_delay=30.0)
+        events = await collect(open_client.events, 3)
+        await open_client.events.stop()
+
+        assert [e.event_type for e in events] == [
+            EventType.CONNECTED,
+            EventType.MOTION,
+            EventType.DISCONNECTED,
+        ]
+        assert events[-1].msg == "Event Stream Ended"
+
+    async def test_start_while_running_is_a_noop(self, open_client, fake_server):
+        fake_server.route(
+            "/++eventStream",
+            stream_handler([b"20190927092026 3 3 MOTION\r"], delay=0.5),
+        )
+        open_client.events.start()
+        task = open_client.events._task
+        open_client.events.start()
+        assert open_client.events._task is task
+        await open_client.events.stop()
+
+    async def test_stop_from_a_listener_aborts_a_blocked_read(self, open_client, fake_server):
+        """stop() must not wait out the next keepalive or the read timeout."""
+
+        async def handler(request: web.Request) -> web.StreamResponse:
+            resp = web.StreamResponse()
+            await resp.prepare(request)
+            await resp.write(b"20190927092026 3 3 MOTION\r")
+            await asyncio.sleep(30)  # silence: no keepalives coming
+            return resp
+
+        fake_server.route("/++eventStream", handler)
+        stopped = asyncio.Event()
+
+        async def stop_on_motion(event: Event) -> None:
+            if event.event_type is EventType.MOTION:
+                await open_client.events.stop()
+                stopped.set()
+
+        open_client.events.add_listener(stop_on_motion)
+        open_client.events.start()
+        async with asyncio.timeout(5):
+            await stopped.wait()
+        assert open_client.events.running is False
+        assert open_client.events._task is None
+
+    async def test_a_hung_listener_does_not_block_state_updates(
+        self, open_client, fake_server, monkeypatch, caplog
+    ):
+        monkeypatch.setattr("aiosecspy.events.EVENT_QUEUE_MAXSIZE", 2)
+        monkeypatch.setattr("aiosecspy.events.EVENT_QUEUE_PUT_TIMEOUT", 0.05)
+        lines = (
+            b"".join(f"201909270920{i:02d} {i} 3 MOTION\r".encode() for i in range(10, 30))
+            + b"20190927092059 99 3 MOTION_END\r"
+        )
+        fake_server.route("/++eventStream", stream_handler([lines], delay=0.5))
+        blocker = asyncio.Event()
+
+        async def hung(_event: Event) -> None:
+            await blocker.wait()
+
+        open_client.events.add_listener(hung)
+        open_client.events.start()
+        # The reader must fold every line into camera state even though the
+        # only listener never finishes handling the first event. Seeing
+        # last_motion_time set and motion inactive again proves the reader got
+        # through the MOTIONs to the final MOTION_END.
+        cam = open_client.camera(3)
+        await wait_for(lambda: cam.last_motion_time is not None and not cam.motion_active)
+        assert "not keeping up" in caplog.text
+        blocker.set()
+        await open_client.events.stop()
+
+
+class TestCameraStateFromTheStream:
+    """The reader folds wire events into the client's Camera objects."""
+
+    async def test_motion_events_drive_motion_state(self, open_client):
+        events = open_client.events
+        cam = open_client.camera(3)
+        await events._handle_line("20190927092026 3 3 MOTION")
+        assert cam.motion_active is True
+        assert cam.last_motion_time is not None
+        assert cam.last_motion_time.year == 2019
+
+        await events._handle_line("20190927092027 4 3 TRIGGER_M 9")
+        assert "Motion Detected" in cam.trigger_reasons
+
+        await events._handle_line("20190927092036 5 3 MOTION_END")
+        assert cam.motion_active is False
+
+    async def test_arm_and_disarm_events_flip_modes(self, open_client):
+        events = open_client.events
+        cam = open_client.camera(3)
+        for line, attr, expected in [
+            ("20190927092026 3 3 DISARM_M", "armed_motion", False),
+            ("20190927092027 4 3 ARM_M", "armed_motion", True),
+            ("20190927092028 5 3 DISARM_C", "armed_continuous", False),
+            ("20190927092029 6 3 ARM_C", "armed_continuous", True),
+            ("20190927092030 7 3 DISARM_A", "armed_actions", False),
+            ("20190927092031 8 3 ARM_A", "armed_actions", True),
+        ]:
+            await events._handle_line(line)
+            assert getattr(cam, attr) is expected, line
+
+    async def test_online_and_offline_track_connected(self, open_client):
+        events = open_client.events
+        cam = open_client.camera(3)
+        await events._handle_line("20190927092026 3 3 OFFLINE")
+        assert cam.connected is False
+        await events._handle_line("20190927092027 4 3 ONLINE")
+        assert cam.connected is True
+
+    async def test_classify_overwrites_all_scores(self, open_client):
+        events = open_client.events
+        cam = open_client.camera(3)
+        await events._handle_line("20190927092026 3 3 CLASSIFY HUMAN 10 VEHICLE 95")
+        assert (cam.score_human, cam.score_vehicle) == (10, 95)
+        assert cam.event_object == "vehicle"
+
+        # A class absent from a later event must not keep its stale score.
+        await events._handle_line("20190927092027 4 3 CLASSIFY HUMAN 85")
+        assert cam.score_human == 85
+        assert cam.score_vehicle == CLASSIFY_ABSENT
+        assert cam.event_object == "human"
+
+        # No classes present at all clears the detected object.
+        await events._handle_line("20190927092028 5 3 CLASSIFY")
+        assert cam.event_object is None
+        assert cam.score_human == CLASSIFY_ABSENT
+
+    async def test_events_for_unknown_cameras_are_ignored(self, open_client):
+        await open_client.events._handle_line("20190927092026 3 99 MOTION")
+        assert 99 not in open_client.cameras

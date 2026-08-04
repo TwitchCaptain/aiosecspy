@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
 from conftest import read_fixture
 
@@ -110,11 +112,12 @@ class TestPTZCapabilities:
 
 class TestRuntimeState:
     def test_copy_runtime_state_carries_event_fields(self):
+        when = datetime(2026, 8, 3, 1, 0, 0, tzinfo=UTC)
         old = Camera(number=1, name="Door")
         old.motion_active = True
         old.event_object = "human"
         old.score_human = 97
-        old.last_motion_time = "2026-08-03T01:00:00"
+        old.last_motion_time = when
         old.trigger_reasons = ["Motion Detected"]
 
         new = Camera(number=1, name="Door")
@@ -123,7 +126,7 @@ class TestRuntimeState:
         assert new.motion_active is True
         assert new.event_object == "human"
         assert new.score_human == 97
-        assert new.last_motion_time == "2026-08-03T01:00:00"
+        assert new.last_motion_time == when
         assert new.trigger_reasons == ["Motion Detected"]
         # The list is copied, not shared.
         new.trigger_reasons.append("Human Detected")

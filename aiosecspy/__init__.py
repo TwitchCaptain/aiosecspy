@@ -1,7 +1,7 @@
 """Async SecuritySpy client library."""
 
 from .client import SecSpyClient
-from .const import CameraMode, EventType, TriggerReason
+from .const import CLASSIFY_ABSENT, CameraMode, EventType, TriggerReason
 from .events import Event, EventStream, parse_event_line
 from .exceptions import (
     AuthenticationError,
@@ -12,10 +12,11 @@ from .exceptions import (
     UnsupportedError,
     UntrustedHostError,
 )
-from .models import Camera, PTZCapabilities, ServerInfo
+from .models import Camera, PTZCapabilities, RecordingFile, ServerInfo
 from .systeminfo import parse_system_info
 
 __all__ = [
+    "CLASSIFY_ABSENT",
     "AuthenticationError",
     "Camera",
     "CameraMode",
@@ -24,6 +25,7 @@ __all__ = [
     "EventType",
     "InvalidResponseError",
     "PTZCapabilities",
+    "RecordingFile",
     "RequestError",
     "ResponseTooLargeError",
     "SecSpyClient",
@@ -36,4 +38,4 @@ __all__ = [
     "parse_system_info",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
