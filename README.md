@@ -69,13 +69,24 @@ async def watch() -> None:
 
 `Event.when` is timezone-aware, using the server's UTC offset from `++systemInfo`.
 
+While the stream is running it also keeps the `Camera` objects current:
+`motion_active`, `event_object`, the classification scores, `last_motion_time`,
+`trigger_reasons`, arm modes, and `connected` all update the moment the matching
+event arrives, before any listener runs. Reading `client.cameras` is therefore
+always live state — no listener required.
+
+Listeners run on a dispatcher task decoupled from the stream reads, so a slow
+callback delays other callbacks but never the state updates. If a callback
+stalls long enough to fill the backlog, the oldest queued events are dropped
+(and a warning logged) rather than stalling the socket.
+
 Alongside the wire event types, the stream emits a few of its own so you can
 drive UI state without polling:
 
 | Event type | Meaning |
 | --- | --- |
 | `CONNECTED` | The stream attached successfully. |
-| `DISCONNECTED` | The stream dropped; a reconnect is scheduled. |
+| `DISCONNECTED` | The stream dropped (including a clean server-side close); a reconnect is scheduled. |
 | `AUTHFAIL` | Credentials were rejected. The watcher stops instead of retrying, so this is the signal to start a reauth flow. |
 | `REFRESH` / `REFRESHFAIL` | Result of the automatic `++systemInfo` reload after `CONFIGCHANGE`. |
 
@@ -86,15 +97,18 @@ A listener that raises is logged and skipped; it never takes down the stream.
 | Area | Methods |
 | --- | --- |
 | Lifecycle | `open()`, `close()`, `refresh()`, `camera(number)`, `cameras`, `info` |
-| Arming | `toggle_motion()`, `toggle_actions()`, `toggle_continuous()`, `trigger_motion()` |
+| Arming | `toggle_motion(n, arm=...)`, `toggle_actions(n, arm=...)`, `toggle_continuous(n, arm=...)`, `trigger_motion()` |
 | Schedules | `set_schedule()`, `set_schedule_override()`, `set_schedule_preset()` |
-| PTZ | `ptz_left/right/up/down/zoom/home/stop()`, `ptz_preset(1-8)`, `ptz_command()` |
+| PTZ | `ptz_left/right/up/down()`, diagonals, `ptz_zoom/home/stop()`, `ptz_preset(1-8)`, `ptz_save_preset(1-8)`, `ptz_command()` |
 | Video | `get_image()`, `image_url()`, `mjpeg_url()`, `hls_url()`, `rtsp_url()` |
 | Recordings | `list_motion_files()`, `download_file()`, `download_latest_motion_recording()` |
 
 `refresh()` replaces the `Camera` objects but carries over the runtime state the
 event stream maintains (motion, classification scores, trigger reasons), so a
 refresh does not blank out live state.
+
+`list_motion_files()` returns `RecordingFile(title=..., href=...)` records; pass
+the `href` to `download_file()`.
 
 ### Errors
 

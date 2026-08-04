@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 from collections.abc import Awaitable, Callable
@@ -15,6 +16,8 @@ import aiohttp
 from .const import (
     CLASSIFY_ABSENT,
     EVENT_MAX_LINE_BYTES,
+    EVENT_QUEUE_MAXSIZE,
+    EVENT_QUEUE_PUT_TIMEOUT,
     EVENT_READ_TIMEOUT,
     EVENT_RECONNECT_DELAY,
     EVENT_RECONNECT_MAX_DELAY,
@@ -29,6 +32,7 @@ from .util import redact
 
 if TYPE_CHECKING:
     from .client import SecSpyClient
+    from .models import Camera
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -176,14 +180,35 @@ def _parse_trigger_reasons(token: str, event: Event, major_version: int) -> None
         event.reason_names.append(TRIGGER_REASON_NAMES.get(flag, flag.name))
 
 
+# Camera mode fields flipped by arm/disarm wire events.
+_ARM_EVENT_FIELDS: dict[EventType, tuple[str, str]] = {
+    EventType.ARM_C: ("mode_c", "armed"),
+    EventType.DISARM_C: ("mode_c", "disarmed"),
+    EventType.ARM_M: ("mode_m", "armed"),
+    EventType.DISARM_M: ("mode_m", "disarmed"),
+    EventType.ARM_A: ("mode_a", "armed"),
+    EventType.DISARM_A: ("mode_a", "disarmed"),
+}
+
+
 class EventStream:
-    """Long-lived ++eventStream reader with reconnect."""
+    """Long-lived ++eventStream reader with reconnect.
+
+    The reader task applies every event to the client's :class:`~.models.Camera`
+    objects the moment it is parsed, then hands it to a dispatcher task that
+    runs the registered listeners. A slow listener delays other listeners but
+    never the stream reads or the camera state.
+    """
 
     def __init__(self, client: SecSpyClient) -> None:
         """Bind a stream reader to a client; nothing runs until :meth:`start`."""
         self._client = client
         self._callbacks: list[EventCallback] = []
         self._task: asyncio.Task[None] | None = None
+        self._dispatch_task: asyncio.Task[None] | None = None
+        self._queue: asyncio.Queue[Event | None] = asyncio.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
+        self._queue_degraded = False
+        self._resp: aiohttp.ClientResponse | None = None
         self._stop = asyncio.Event()
         self._refresh_on_config_change = True
         self.running = False
@@ -205,7 +230,7 @@ class EventStream:
         refresh_on_config_change: bool = True,
         read_timeout: float | None = EVENT_READ_TIMEOUT,
     ) -> None:
-        """Start the background watcher task.
+        """Start the background watcher and dispatcher tasks.
 
         ``read_timeout`` bounds the silence between event lines. SecuritySpy
         sends NULL keepalives, so a longer gap means the connection is dead even
@@ -219,24 +244,41 @@ class EventStream:
         self._refresh_on_config_change = refresh_on_config_change
         self._stop.clear()
         self.running = True
+        self._queue = asyncio.Queue(maxsize=EVENT_QUEUE_MAXSIZE)
+        self._queue_degraded = False
+        self._dispatch_task = asyncio.create_task(self._dispatch_loop(), name="aiosecspy-dispatch")
         self._task = asyncio.create_task(
             self._watch_loop(reconnect_delay, read_timeout),
             name="aiosecspy-eventstream",
         )
 
     async def stop(self) -> None:
-        """Stop the watcher and wait for it to exit."""
+        """Stop the watcher and dispatcher and wait for them to exit.
+
+        Safe to call from inside a listener: the dispatcher (which runs the
+        listeners) is signalled instead of cancelled, and the in-flight stream
+        read is aborted by closing the response rather than waiting out the
+        next keepalive or read timeout.
+        """
         self._stop.set()
         self.running = False
-        task, self._task = self._task, None
-        if task is None or task is asyncio.current_task():
-            # Called from inside a listener: the flag above is enough, and
-            # cancelling ourselves here would just raise into the callback.
-            return
-        task.cancel()
+        if self._resp is not None:
+            self._resp.close()
+        with contextlib.suppress(asyncio.QueueFull):
+            self._queue.put_nowait(None)
+        current = asyncio.current_task()
+        tasks: list[asyncio.Task[None]] = []
+        for attr in ("_task", "_dispatch_task"):
+            task: asyncio.Task[None] | None = getattr(self, attr)
+            setattr(self, attr, None)
+            if task is None or task is current:
+                continue
+            task.cancel()
+            tasks.append(task)
         # return_exceptions keeps the expected CancelledError, and anything the
-        # watcher died of, from escaping what is a cleanup call.
-        await asyncio.gather(task, return_exceptions=True)
+        # tasks died of, from escaping what is a cleanup call.
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     async def _emit(self, event: Event) -> None:
         for callback in list(self._callbacks):
@@ -249,8 +291,46 @@ class EventStream:
             except Exception:
                 _LOGGER.exception("Event listener failed for %s", event.event_type)
 
-    async def _emit_synthetic(self, event_type: EventType, msg: str, event_id: int) -> None:
-        await self._emit(Event(event_type=event_type, msg=redact(msg), event_id=event_id))
+    async def _enqueue(self, event: Event) -> None:
+        """Queue an event for the dispatcher without ever stalling reads.
+
+        A full queue normally just means a burst outran the listeners, so the
+        reader waits briefly for the dispatcher to catch up. If it cannot, a
+        listener is stuck: switch to dropping the oldest events (degraded mode)
+        until the dispatcher makes the queue healthy again.
+        """
+        if not self._queue_degraded:
+            try:
+                await asyncio.wait_for(self._queue.put(event), timeout=EVENT_QUEUE_PUT_TIMEOUT)
+            except TimeoutError:
+                self._queue_degraded = True
+                _LOGGER.warning("Event listeners are not keeping up; dropping oldest events")
+            else:
+                return
+        elif not self._queue.full():
+            self._queue_degraded = False
+            _LOGGER.info("Event listeners caught up; resuming normal delivery")
+            self._queue.put_nowait(event)
+            return
+        with contextlib.suppress(asyncio.QueueEmpty):
+            self._queue.get_nowait()
+        with contextlib.suppress(asyncio.QueueFull):
+            self._queue.put_nowait(event)
+
+    async def _queue_synthetic(self, event_type: EventType, msg: str, event_id: int) -> None:
+        await self._enqueue(Event(event_type=event_type, msg=redact(msg), event_id=event_id))
+
+    async def _dispatch_loop(self) -> None:
+        """Run listeners for queued events; also owns CONFIGCHANGE refreshes."""
+        while True:
+            event = await self._queue.get()
+            if event is None or self._stop.is_set():
+                return
+            await self._emit(event)
+            if self._stop.is_set():
+                return
+            if event.event_type is EventType.CONFIGCHANGE and self._refresh_on_config_change:
+                await self._refresh_client()
 
     async def _watch_loop(self, reconnect_delay: float, read_timeout: float | None) -> None:
         delay = reconnect_delay
@@ -263,15 +343,22 @@ class EventStream:
                 # Credentials will not fix themselves; stop instead of hammering
                 # the server with requests that can trip lockout protections.
                 _LOGGER.error("Event stream authentication failed: %s", err)  # noqa: TRY400 - a traceback adds nothing here
-                await self._emit_synthetic(EventType.AUTHFAIL, str(err), EVENT_ID_AUTH_FAIL)
-                await self._emit_synthetic(EventType.DISCONNECTED, str(err), EVENT_ID_DISCONNECTED)
+                await self._queue_synthetic(EventType.AUTHFAIL, str(err), EVENT_ID_AUTH_FAIL)
+                await self._queue_synthetic(EventType.DISCONNECTED, str(err), EVENT_ID_DISCONNECTED)
                 self.running = False
                 return
             except Exception as err:  # noqa: BLE001 - the watcher must never die
                 _LOGGER.warning("Event stream error: %s", redact(str(err)))
-                await self._emit_synthetic(EventType.DISCONNECTED, str(err), EVENT_ID_DISCONNECTED)
+                await self._queue_synthetic(EventType.DISCONNECTED, str(err), EVENT_ID_DISCONNECTED)
             else:
                 delay = reconnect_delay
+                if not self._stop.is_set():
+                    # A clean EOF still means the stream is down until the
+                    # reconnect succeeds; consumers tracking connectivity need
+                    # to hear about the gap.
+                    await self._queue_synthetic(
+                        EventType.DISCONNECTED, "Event Stream Ended", EVENT_ID_DISCONNECTED
+                    )
             if self._stop.is_set():
                 break
             try:
@@ -296,14 +383,19 @@ class EventStream:
             timeout=timeout,
             ssl=client.verify_ssl,
         ) as resp:
-            if resp.status in {401, 403}:
-                msg = f"event stream auth failed: HTTP {resp.status}"
-                raise AuthenticationError(msg)
-            resp.raise_for_status()
-            await self._emit_synthetic(
-                EventType.CONNECTED, "Event Stream Connected", EVENT_ID_CONNECTED
-            )
-            await self._read_stream(resp)
+            # Held so stop() can abort a read blocked between keepalives.
+            self._resp = resp
+            try:
+                if resp.status in {401, 403}:
+                    msg = f"event stream auth failed: HTTP {resp.status}"
+                    raise AuthenticationError(msg)
+                resp.raise_for_status()
+                await self._queue_synthetic(
+                    EventType.CONNECTED, "Event Stream Connected", EVENT_ID_CONNECTED
+                )
+                await self._read_stream(resp)
+            finally:
+                self._resp = None
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> None:
         buffer = bytearray()
@@ -335,9 +427,59 @@ class EventStream:
         gmt_hours = info.gmt_offset_seconds / 3600.0 if info else 0.0
         major = info.major_version if info else 6
         event = parse_event_line(line, gmt_hours, major_version=major)
-        await self._emit(event)
-        if event.event_type is EventType.CONFIGCHANGE and self._refresh_on_config_change:
-            await self._refresh_client()
+        self._apply_event(event)
+        await self._enqueue(event)
+
+    def _apply_event(self, event: Event) -> None:
+        """Fold a wire event into the client's Camera runtime state.
+
+        ++systemInfo does not report motion or classification, so the stream is
+        the only source for those fields. Applying them here, before listeners
+        run, keeps ``client.cameras`` current even with no listener registered.
+        """
+        cam = (
+            self._client.cameras.get(event.camera_number)
+            if event.camera_number is not None
+            else None
+        )
+        if cam is None:
+            return
+        et = event.event_type
+        if et in _ARM_EVENT_FIELDS:
+            attr, value = _ARM_EVENT_FIELDS[et]
+            setattr(cam, attr, value)
+        elif et in {EventType.MOTION, EventType.TRIGGER_M}:
+            cam.motion_active = True
+            if event.when:
+                cam.last_motion_time = event.when
+            cam.trigger_reasons = list(event.reason_names)
+        elif et is EventType.MOTION_END:
+            cam.motion_active = False
+        elif et in {EventType.ONLINE, EventType.OFFLINE}:
+            cam.connected = et is EventType.ONLINE
+        elif et is EventType.CLASSIFY:
+            self._apply_classify(cam, event)
+
+    @staticmethod
+    def _apply_classify(cam: Camera, event: Event) -> None:
+        # Every CLASSIFY overwrites all three scores (absent classes arrive as
+        # CLASSIFY_ABSENT), so a stale detection never lingers. event_object is
+        # the top class actually present in this event, or None.
+        cam.score_human = event.classify_human
+        cam.score_vehicle = event.classify_vehicle
+        cam.score_animal = event.classify_animal
+        present = [
+            (label, value)
+            for label, value in (
+                ("human", event.classify_human),
+                ("vehicle", event.classify_vehicle),
+                ("animal", event.classify_animal),
+            )
+            if value >= 0
+        ]
+        cam.event_object = max(present, key=lambda item: item[1])[0] if present else None
+        if event.when:
+            cam.last_motion_time = event.when
 
     async def _refresh_client(self) -> None:
         try:
@@ -345,10 +487,20 @@ class EventStream:
         except asyncio.CancelledError:
             raise
         except Exception as err:  # noqa: BLE001 - reported to listeners instead
-            await self._emit_synthetic(EventType.REFRESHFAIL, str(err), EVENT_ID_REFRESH_FAIL)
+            await self._emit(
+                Event(
+                    event_type=EventType.REFRESHFAIL,
+                    msg=redact(str(err)),
+                    event_id=EVENT_ID_REFRESH_FAIL,
+                )
+            )
         else:
-            await self._emit_synthetic(
-                EventType.REFRESH, "SystemInfo Refresh Success", EVENT_ID_REFRESH
+            await self._emit(
+                Event(
+                    event_type=EventType.REFRESH,
+                    msg="SystemInfo Refresh Success",
+                    event_id=EVENT_ID_REFRESH,
+                )
             )
 
 

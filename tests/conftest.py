@@ -29,6 +29,7 @@ class Call:
 
     path: str
     query: dict[str, str]
+    query_pairs: list[tuple[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -82,8 +83,22 @@ class FakeSecSpy:
         """Every path requested so far, in order."""
         return [call.path for call in self.calls]
 
+    def query_pairs_for(self, path: str) -> list[tuple[str, str]]:
+        """Return the raw (key, value) query pairs of the most recent request."""
+        for call in reversed(self.calls):
+            if call.path == path:
+                return call.query_pairs
+        msg = f"no request was made to {path}; saw {[c.path for c in self.calls]}"
+        raise AssertionError(msg)
+
     async def _handle(self, request: web.Request) -> web.StreamResponse:
-        self.calls.append(Call(path=request.path, query=dict(request.query)))
+        self.calls.append(
+            Call(
+                path=request.path,
+                query=dict(request.query),
+                query_pairs=list(request.query.items()),
+            )
+        )
         responder = self.routes.get(request.path)
         if responder is None:
             return web.Response(status=404, text="Not Found")

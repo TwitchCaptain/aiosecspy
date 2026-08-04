@@ -24,14 +24,19 @@ from .const import (
     MIN_PORT,
     MIN_QUALITY,
     PTZ_DOWN,
+    PTZ_DOWN_LEFT,
+    PTZ_DOWN_RIGHT,
     PTZ_HOME_CMD,
     PTZ_LEFT,
     PTZ_PRESET_BASE,
     PTZ_PRESET_MAX,
     PTZ_PRESET_MIN,
+    PTZ_PRESET_SAVE_BASE,
     PTZ_RIGHT,
     PTZ_STOP,
     PTZ_UP,
+    PTZ_UP_LEFT,
+    PTZ_UP_RIGHT,
     PTZ_ZOOM_IN,
     PTZ_ZOOM_OUT,
     CameraMode,
@@ -44,6 +49,7 @@ from .exceptions import (
     UnsupportedError,
     UntrustedHostError,
 )
+from .models import RecordingFile
 from .systeminfo import parse_system_info
 from .util import parse_xml, redact
 
@@ -53,6 +59,25 @@ if TYPE_CHECKING:
 # Sequences that must never appear in a request path we build from a
 # server-supplied href, because they can retarget the request.
 _UNSAFE_PATH = ("://", "\\", "\n", "\r", "\t")
+
+# Camera fields mirrored locally when a schedule (or override) is set; X
+# applies to all three modes.
+_SCHEDULE_FIELDS: dict[CameraMode, tuple[str, ...]] = {
+    CameraMode.CONTINUOUS: ("schedule_id_cc",),
+    CameraMode.MOTION: ("schedule_id_mc",),
+    CameraMode.ACTIONS: ("schedule_id_a",),
+    CameraMode.ALL: ("schedule_id_cc", "schedule_id_mc", "schedule_id_a"),
+}
+_OVERRIDE_FIELDS: dict[CameraMode, tuple[str, ...]] = {
+    CameraMode.CONTINUOUS: ("schedule_override_cc",),
+    CameraMode.MOTION: ("schedule_override_mc",),
+    CameraMode.ACTIONS: ("schedule_override_a",),
+    CameraMode.ALL: (
+        "schedule_override_cc",
+        "schedule_override_mc",
+        "schedule_override_a",
+    ),
+}
 
 
 def _reject_embedded_port() -> None:
@@ -148,6 +173,11 @@ class SecSpyClient:
         if timeout <= 0:
             msg = f"timeout must be positive, got {timeout}"
             raise ValueError(msg)
+        if ":" in username:
+            # The auth blob and RTSP userinfo both join user and password with
+            # a colon, so a colon in the username makes the split ambiguous.
+            msg = "username must not contain ':'"
+            raise ValueError(msg)
 
         self.host = _normalize_host(host)
         self.port = port
@@ -166,8 +196,8 @@ class SecSpyClient:
         self.events = EventStream(self)
 
     def __repr__(self) -> str:
-        """Describe the client without exposing credentials."""
-        return f"<SecSpyClient {self.scheme}://{self.host}:{self.port} user={self._username!r}>"
+        """Describe the client without exposing credentials (or the username)."""
+        return f"<SecSpyClient {self.scheme}://{self.host}:{self.port}>"
 
     @property
     def session(self) -> aiohttp.ClientSession | None:
@@ -217,12 +247,22 @@ class SecSpyClient:
             msg = f"refusing to request traversing path: {shown!r}"
             raise UntrustedHostError(msg)
 
-    def _params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
-        # Auth is written last so a server-supplied href query cannot replace
-        # the client's credentials (for example via ++download link params).
-        params: dict[str, Any] = dict(extra) if extra else {}
-        params["auth"] = self._auth
-        return params
+    def _params(self, extra: dict[str, Any] | None = None) -> list[tuple[str, str]]:
+        # Returned as (key, value) pairs so multi-valued parameters (repeated
+        # cameraNum in ++download) survive. Any "auth" arriving via extra (for
+        # example from a server-supplied href query) is discarded so the
+        # client's credential blob stays authoritative.
+        items: list[tuple[str, str]] = []
+        if extra:
+            for key, value in extra.items():
+                if key.lower() == "auth":
+                    continue
+                if isinstance(value, (list, tuple)):
+                    items.extend((key, str(v)) for v in value)
+                else:
+                    items.append((key, str(value)))
+        items.append(("auth", self._auth))
+        return items
 
     def event_stream_url(self) -> str:
         """Absolute ++eventStream URL, without credentials.
@@ -231,7 +271,7 @@ class SecSpyClient:
         """
         return self._url("++eventStream")
 
-    def auth_params(self, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    def auth_params(self, extra: dict[str, Any] | None = None) -> list[tuple[str, str]]:
         """Query parameters carrying the auth blob. The result is a secret."""
         return self._params(extra)
 
@@ -332,11 +372,18 @@ class SecSpyClient:
         if declared is not None and declared > max_bytes:
             msg = f"{label} response is {declared} bytes, over the {max_bytes} byte limit"
             raise ResponseTooLargeError(msg)
-        body = await resp.content.read(max_bytes + 1)
+        # StreamReader.read(n) returns as soon as any data is buffered, not
+        # after n bytes, so the body must be accumulated to EOF (or the cap).
+        body = bytearray()
+        while len(body) <= max_bytes:
+            chunk = await resp.content.read(max_bytes + 1 - len(body))
+            if not chunk:
+                break
+            body.extend(chunk)
         if len(body) > max_bytes:
             msg = f"{label} response exceeded the {max_bytes} byte limit"
             raise ResponseTooLargeError(msg)
-        return body
+        return bytes(body)
 
     async def _request_text(self, api: str, params: dict[str, Any] | None = None) -> str:
         return (await self._request(api, params)).decode("utf-8", errors="replace")
@@ -372,7 +419,7 @@ class SecSpyClient:
             raise KeyError(msg)
         return cams[number]
 
-    async def toggle_motion(self, camera_num: int, arm: bool) -> None:  # noqa: FBT001 - mirrors the arm=0/1 wire API
+    async def toggle_motion(self, camera_num: int, *, arm: bool) -> None:
         """Arm/disarm motion capture."""
         await self._request_ok(
             "++ssControlMotionCapture",
@@ -381,7 +428,7 @@ class SecSpyClient:
         if camera_num in self.cameras:
             self.cameras[camera_num].mode_m = "armed" if arm else "disarmed"
 
-    async def toggle_actions(self, camera_num: int, arm: bool) -> None:  # noqa: FBT001 - mirrors the arm=0/1 wire API
+    async def toggle_actions(self, camera_num: int, *, arm: bool) -> None:
         """Arm/disarm actions."""
         await self._request_ok(
             "++ssControlActions",
@@ -390,7 +437,7 @@ class SecSpyClient:
         if camera_num in self.cameras:
             self.cameras[camera_num].mode_a = "armed" if arm else "disarmed"
 
-    async def toggle_continuous(self, camera_num: int, arm: bool) -> None:  # noqa: FBT001 - mirrors the arm=0/1 wire API
+    async def toggle_continuous(self, camera_num: int, *, arm: bool) -> None:
         """Arm/disarm continuous capture.
 
         Many SecuritySpy builds do not ship ``++ssControlContinuous`` and answer
@@ -434,27 +481,45 @@ class SecSpyClient:
 
     async def set_schedule(self, camera_num: int, mode: CameraMode | str, schedule_id: int) -> None:
         """Set camera schedule for mode C/M/A/X."""
+        mode = CameraMode(mode)
         await self._request_ok(
             "++ssSetSchedule",
             {
                 "cameraNum": camera_num,
-                "mode": str(CameraMode(mode)),
+                "mode": str(mode),
                 "id": schedule_id,
             },
         )
+        self._store_schedule_ids(camera_num, mode, schedule_id, _SCHEDULE_FIELDS)
 
     async def set_schedule_override(
         self, camera_num: int, mode: CameraMode | str, override_id: int
     ) -> None:
         """Set camera schedule override for mode C/M/A/X."""
+        mode = CameraMode(mode)
         await self._request_ok(
             "++ssSetOverride",
             {
                 "cameraNum": camera_num,
-                "mode": str(CameraMode(mode)),
+                "mode": str(mode),
                 "id": override_id,
             },
         )
+        self._store_schedule_ids(camera_num, mode, override_id, _OVERRIDE_FIELDS)
+
+    def _store_schedule_ids(
+        self,
+        camera_num: int,
+        mode: CameraMode,
+        value: int,
+        fields: dict[CameraMode, tuple[str, ...]],
+    ) -> None:
+        """Mirror a schedule change onto the local Camera, like toggle_* does."""
+        cam = self.cameras.get(camera_num)
+        if cam is None:
+            return
+        for attr in fields[mode]:
+            setattr(cam, attr, value)
 
     async def set_schedule_preset(self, preset_id: int) -> None:
         """Activate a server-wide schedule preset."""
@@ -563,7 +628,23 @@ class SecSpyClient:
         """Tilt down."""
         await self.ptz_command(camera_num, PTZ_DOWN)
 
-    async def ptz_zoom(self, camera_num: int, zoom_in: bool = True) -> None:  # noqa: FBT001, FBT002
+    async def ptz_up_left(self, camera_num: int) -> None:
+        """Move up and to the left one click."""
+        await self.ptz_command(camera_num, PTZ_UP_LEFT)
+
+    async def ptz_up_right(self, camera_num: int) -> None:
+        """Move up and to the right one click."""
+        await self.ptz_command(camera_num, PTZ_UP_RIGHT)
+
+    async def ptz_down_left(self, camera_num: int) -> None:
+        """Move down and to the left one click."""
+        await self.ptz_command(camera_num, PTZ_DOWN_LEFT)
+
+    async def ptz_down_right(self, camera_num: int) -> None:
+        """Move down and to the right one click."""
+        await self.ptz_command(camera_num, PTZ_DOWN_RIGHT)
+
+    async def ptz_zoom(self, camera_num: int, *, zoom_in: bool = True) -> None:
         """Zoom in or out."""
         await self.ptz_command(camera_num, PTZ_ZOOM_IN if zoom_in else PTZ_ZOOM_OUT)
 
@@ -575,12 +656,21 @@ class SecSpyClient:
         """Stop continuous PTZ movement."""
         await self.ptz_command(camera_num, PTZ_STOP)
 
-    async def ptz_preset(self, camera_num: int, preset: int) -> None:
-        """Move to preset 1-8."""
+    @staticmethod
+    def _check_preset(preset: int) -> None:
         if not PTZ_PRESET_MIN <= preset <= PTZ_PRESET_MAX:
             msg = f"PTZ preset must be {PTZ_PRESET_MIN}-{PTZ_PRESET_MAX}, got {preset}"
             raise ValueError(msg)
+
+    async def ptz_preset(self, camera_num: int, preset: int) -> None:
+        """Move to preset 1-8."""
+        self._check_preset(preset)
         await self.ptz_command(camera_num, PTZ_PRESET_BASE + (preset - PTZ_PRESET_MIN))
+
+    async def ptz_save_preset(self, camera_num: int, preset: int) -> None:
+        """Save the current position as preset 1-8."""
+        self._check_preset(preset)
+        await self.ptz_command(camera_num, PTZ_PRESET_SAVE_BASE + (preset - PTZ_PRESET_MIN))
 
     async def list_motion_files(
         self,
@@ -588,7 +678,7 @@ class SecSpyClient:
         *,
         days: int = 1,
         limit: int = 20,
-    ) -> list[dict[str, str]]:
+    ) -> list[RecordingFile]:
         """List recent motion capture files via ++download.
 
         ``days`` counts back from today in the server's timezone, which is what
@@ -611,6 +701,10 @@ class SecSpyClient:
         }
         if camera_num is not None:
             params["cameraNum"] = camera_num
+        elif self.cameras:
+            # A real server returns an empty feed unless cameraNum is present,
+            # so "every camera" has to be spelled out as repeated parameters.
+            params["cameraNum"] = sorted(self.cameras)
         text = await self._request_text("++download", params)
         return _parse_file_feed(text, limit)
 
@@ -671,14 +765,14 @@ class SecSpyClient:
         if not files:
             msg = f"no motion recordings found for camera {camera_num}"
             raise RequestError(msg)
-        return await self.download_file(files[0]["href"], high_bandwidth=high_bandwidth)
+        return await self.download_file(files[0].href, high_bandwidth=high_bandwidth)
 
 
-def _parse_file_feed(xml_text: str, limit: int) -> list[dict[str, str]]:
-    """Pull ``{title, href}`` pairs out of a ++download feed."""
+def _parse_file_feed(xml_text: str, limit: int) -> list[RecordingFile]:
+    """Pull recording titles and hrefs out of a ++download feed."""
     root = parse_xml(xml_text, label="++download")
     items = root.findall(".//item") or root.findall(".//entry") or root.findall(".//file")
-    results: list[dict[str, str]] = []
+    results: list[RecordingFile] = []
     for item in items:
         title = item.findtext("title") or item.findtext("name") or ""
         link = item.find("link")
@@ -688,11 +782,11 @@ def _parse_file_feed(xml_text: str, limit: int) -> list[dict[str, str]]:
         if not href:
             href = item.findtext("href") or item.attrib.get("href") or ""
         if href:
-            results.append({"title": title, "href": href})
+            results.append(RecordingFile(title=title, href=href))
     if not results:
         for el in root.iter():
             href = el.attrib.get("href") or ""
             if href and ("getfile" in href or href.startswith("++")):
                 title = el.findtext("title") or el.findtext("name") or el.tag
-                results.append({"title": title, "href": href})
+                results.append(RecordingFile(title=title, href=href))
     return results[:limit]

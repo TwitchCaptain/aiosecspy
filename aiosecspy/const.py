@@ -37,10 +37,8 @@ class EventType(StrEnum):
     DISCONNECTED = "DISCONNECTED"
     AUTHFAIL = "AUTHFAIL"
     UNKNOWN = "UNKNOWN"
-    ALL = "ALL"
     REFRESH = "REFRESH"
     REFRESHFAIL = "REFRESHFAIL"
-    CUSTOM = "CUSTOM"
 
 
 KNOWN_EVENT_TYPES = frozenset(
@@ -134,9 +132,13 @@ PTZ_UP_LEFT = 8
 PTZ_UP_RIGHT = 9
 PTZ_DOWN_LEFT = 10
 PTZ_DOWN_RIGHT = 11
-PTZ_PRESET_BASE = 12  # preset N -> 11+N
+PTZ_PRESET_BASE = 12  # goto preset N -> command 12 + (N - 1)
 PTZ_STOP = 99
+PTZ_PRESET_SAVE_BASE = 112  # save preset N -> command 112 + (N - 1)
 
+# SecuritySpy's wire protocol addresses presets 1-8 (commands 12-19 / 112-119).
+# ++systemInfo can carry preset-name-9/10 entries, but there is no command to
+# recall them, so the library ignores them.
 PTZ_PRESET_MIN = 1
 PTZ_PRESET_MAX = 8
 
@@ -151,6 +153,12 @@ EVENT_READ_TIMEOUT = 300.0
 # A single event line is a timestamp, id, camera and a short message. Anything
 # larger is a malformed or hostile stream, so the reassembly buffer is capped.
 EVENT_MAX_LINE_BYTES = 64 * 1024
+# Events waiting for listeners queue up here. When the queue fills, the reader
+# briefly waits for the dispatcher to catch up (ordinary burst); if it cannot
+# within the timeout, a listener is stuck and the oldest events are dropped so
+# stream reads never stall behind a hung callback.
+EVENT_QUEUE_MAXSIZE = 512
+EVENT_QUEUE_PUT_TIMEOUT = 5.0
 
 # Response size ceilings. A compromised or malfunctioning server should not be
 # able to exhaust memory on the client.

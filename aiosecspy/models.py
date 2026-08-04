@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from .const import (
+    CLASSIFY_ABSENT,
     PTZ_CONTINUOUS,
     PTZ_HOME,
     PTZ_PAN_TILT,
@@ -12,6 +14,9 @@ from .const import (
     PTZ_SPEED,
     PTZ_ZOOM,
 )
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 
 @dataclass
@@ -62,13 +67,15 @@ class Camera:
     preset_names: dict[int, str] = field(default_factory=dict)
     has_audio: bool = False
     md_enabled: bool = True
-    # Runtime event state (updated by event stream)
+    # Runtime event state, maintained by EventStream while it is running.
+    # Scores default to CLASSIFY_ABSENT (-99) so "never classified" is
+    # distinguishable from a real 0 score.
     motion_active: bool = False
-    event_object: str = "none"
-    score_human: int = 0
-    score_vehicle: int = 0
-    score_animal: int = 0
-    last_motion_time: str | None = None
+    event_object: str | None = None
+    score_human: int = CLASSIFY_ABSENT
+    score_vehicle: int = CLASSIFY_ABSENT
+    score_animal: int = CLASSIFY_ABSENT
+    last_motion_time: datetime | None = None
     trigger_reasons: list[str] = field(default_factory=list)
 
     @property
@@ -99,6 +106,14 @@ class Camera:
         self.score_animal = other.score_animal
         self.last_motion_time = other.last_motion_time
         self.trigger_reasons = list(other.trigger_reasons)
+
+
+@dataclass(frozen=True)
+class RecordingFile:
+    """One recording advertised by the ++download feed."""
+
+    title: str
+    href: str
 
 
 @dataclass

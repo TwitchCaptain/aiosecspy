@@ -6,6 +6,7 @@
 #
 # Trigger: create a GitHub Release (tag like v0.1.0). The version in
 # aiosecspy/__init__.py must match the release tag (without the leading "v").
+# Manual dispatch also works, but only from a commit tagged v<version>.
 
 name: Publish
 
@@ -25,24 +26,34 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+          fetch-tags: true
 
       - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
 
-      - name: Install build tooling
-        run: python -m pip install --upgrade build twine
+      - name: Install the package with dev tooling
+        run: python -m pip install --upgrade pip && pip install -e .[dev]
 
       - name: Verify the package version matches the release tag
-        if: github.event_name == 'release'
         env:
-          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || '' }}
         run: |
           package_version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' aiosecspy/__init__.py)"
-          if [ "${RELEASE_TAG#v}" != "$package_version" ]; then
+          if [ -z "$RELEASE_TAG" ]; then
+            # Manual dispatch: the checked-out commit must carry the matching
+            # tag, so an arbitrary branch state can never reach PyPI.
+            if ! git tag --points-at HEAD | grep -qx "v${package_version}"; then
+              echo "Manual publish requires tag v${package_version} on HEAD." >&2
+              exit 1
+            fi
+          elif [ "${RELEASE_TAG#v}" != "$package_version" ]; then
             echo "Release tag ${RELEASE_TAG} does not match version ${package_version}." >&2
             exit 1
           fi
+
+      - name: Run the test suite
+        run: python -m pytest -q
 
       - name: Build sdist and wheel
         run: python -m build
