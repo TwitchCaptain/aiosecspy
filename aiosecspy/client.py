@@ -271,9 +271,13 @@ class SecSpyClient:
         """
         return self._url("++eventStream")
 
-    def auth_params(self, extra: dict[str, Any] | None = None) -> list[tuple[str, str]]:
-        """Query parameters carrying the auth blob. The result is a secret."""
-        return self._params(extra)
+    def auth_params(self, extra: dict[str, Any] | None = None) -> dict[str, str]:
+        """Query parameters carrying the auth blob. The result is a secret.
+
+        Returns a plain mapping for easy public use; multi-valued parameters
+        are an internal concern handled by :meth:`_params`.
+        """
+        return dict(self._params(extra))
 
     def _timeout(self) -> aiohttp.ClientTimeout:
         return aiohttp.ClientTimeout(total=self.timeout)

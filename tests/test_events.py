@@ -193,6 +193,10 @@ class TestEventStream:
         fake_server.route("/++eventStream", stream_handler([], status=401))
         open_client.events.start()
         events = await collect(open_client.events, 2)
+        dispatch_task = open_client.events._dispatch_task
+        # The sentinel queued after AUTHFAIL/DISCONNECTED must end the
+        # dispatcher on its own; a leaked task would outlive the watcher.
+        await wait_for(dispatch_task.done)
         await open_client.events.stop()
 
         assert [e.event_type for e in events] == [
@@ -200,6 +204,7 @@ class TestEventStream:
             EventType.DISCONNECTED,
         ]
         assert open_client.events.running is False
+        assert dispatch_task.done()
 
     async def test_a_flood_without_line_breaks_drops_the_connection(self, open_client, fake_server):
         fake_server.route(

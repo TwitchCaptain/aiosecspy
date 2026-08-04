@@ -75,7 +75,7 @@ class TestConstruction:
 
     def test_auth_blob_is_url_safe_base64(self):
         client = SecSpyClient("cam.example", 8000, "user", "p+a/ss")
-        blob = dict(client.auth_params())["auth"]
+        blob = client.auth_params()["auth"]
         assert base64.urlsafe_b64decode(blob) == b"user:p+a/ss"
 
     def test_rejects_a_colon_in_the_username(self):

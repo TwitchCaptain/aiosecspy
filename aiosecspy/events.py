@@ -291,7 +291,7 @@ class EventStream:
             except Exception:
                 _LOGGER.exception("Event listener failed for %s", event.event_type)
 
-    async def _enqueue(self, event: Event) -> None:
+    async def _enqueue(self, event: Event | None) -> None:
         """Queue an event for the dispatcher without ever stalling reads.
 
         A full queue normally just means a burst outran the listeners, so the
@@ -345,6 +345,9 @@ class EventStream:
                 _LOGGER.error("Event stream authentication failed: %s", err)  # noqa: TRY400 - a traceback adds nothing here
                 await self._queue_synthetic(EventType.AUTHFAIL, str(err), EVENT_ID_AUTH_FAIL)
                 await self._queue_synthetic(EventType.DISCONNECTED, str(err), EVENT_ID_DISCONNECTED)
+                # Sentinel ends the dispatcher once it has delivered the events
+                # above; without it the task would wait on this queue forever.
+                await self._enqueue(None)
                 self.running = False
                 return
             except Exception as err:  # noqa: BLE001 - the watcher must never die
